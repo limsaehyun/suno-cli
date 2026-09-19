@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{Mutex, Notify, oneshot};
 
 use crate::errors::CliError;
 
@@ -105,11 +109,9 @@ fn invalid_arguments(message: impl Into<String>) -> Value {
 
 async fn invoke_cli(args: &[String]) -> Result<(bool, String), CliError> {
     let exe = std::env::current_exe()?;
-    let output = tokio::process::Command::new(exe)
-        .arg("--json")
-        .args(args)
-        .output()
-        .await?;
+    let mut command = tokio::process::Command::new(exe);
+    command.arg("--json").args(args).kill_on_drop(true);
+    let output = command.output().await?;
     let body = if output.status.success() {
         String::from_utf8_lossy(&output.stdout).trim().to_string()
     } else {
@@ -118,15 +120,7 @@ async fn invoke_cli(args: &[String]) -> Result<(bool, String), CliError> {
     Ok((output.status.success(), body))
 }
 
-async fn call_tool(params: &Value) -> Result<Value, CliError> {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let args = params
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+async fn call_tool(name: &str, args: Value) -> Result<Value, CliError> {
     let argv = match name {
         "suno_models" => {
             if let Err(error) = serde_json::from_value::<EmptyArgs>(args) {
@@ -145,6 +139,31 @@ async fn call_tool(params: &Value) -> Result<Value, CliError> {
                 Ok(args) => args,
                 Err(error) => return Ok(invalid_arguments(error.to_string())),
             };
+            if args.title.chars().count() > 80 {
+                return Ok(invalid_arguments("title exceeds 80 characters"));
+            }
+            if args.tags.chars().count() > 1000 {
+                return Ok(invalid_arguments("tags exceeds 1000 characters"));
+            }
+            if args
+                .lyrics
+                .as_ref()
+                .is_some_and(|lyrics| lyrics.chars().count() > 5000)
+            {
+                return Ok(invalid_arguments("lyrics exceeds 5000 characters"));
+            }
+            if !matches!(args.model.as_str(), "v6" | "v6-wild" | "v6-mini") {
+                return Ok(invalid_arguments("model must be v6, v6-wild, or v6-mini"));
+            }
+            if args
+                .duration
+                .is_some_and(|duration| !(10..=360).contains(&duration))
+            {
+                return Ok(invalid_arguments("duration must be from 10 to 360"));
+            }
+            if args.variety.is_some_and(|variety| variety > 4) {
+                return Ok(invalid_arguments("variety must be from 0 to 4"));
+            }
             if !args.dry_run && !args.confirm_spend {
                 return Ok(json!({
                     "content": [{"type": "text", "text": "Paid generation requires confirm_spend=true"}],
@@ -186,12 +205,7 @@ async fn call_tool(params: &Value) -> Result<Value, CliError> {
             }
             argv
         }
-        _ => {
-            return Ok(json!({
-                "content": [{"type": "text", "text": format!("Unknown tool: {name}")}],
-                "isError": true
-            }));
-        }
+        _ => unreachable!("tool name validated before dispatch"),
     };
 
     let (ok, body) = invoke_cli(&argv).await?;
@@ -216,22 +230,81 @@ async fn handle(request: Request) -> Result<Option<Value>, CliError> {
         ),
         "ping" => response(id, json!({})),
         "tools/list" => response(id, tools()),
-        "tools/call" => response(id, call_tool(&request.params).await?),
+        "tools/call" => {
+            let Some(name) = request.params.get("name").and_then(Value::as_str) else {
+                return Ok(Some(error(id, -32602, "Missing tool name")));
+            };
+            if !matches!(name, "suno_models" | "suno_credits" | "suno_generate") {
+                return Ok(Some(error(id, -32602, format!("Unknown tool: {name}"))));
+            }
+            let args = request
+                .params
+                .get("arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            response(id, call_tool(name, args).await?)
+        }
         _ => error(id, -32601, format!("Method not found: {}", request.method)),
     };
     Ok(Some(result))
 }
 
+async fn write_response(stdout: &Mutex<tokio::io::Stdout>, output: &Value) -> Result<(), CliError> {
+    let mut stdout = stdout.lock().await;
+    stdout
+        .write_all(serde_json::to_string(output)?.as_bytes())
+        .await?;
+    stdout.write_all(b"\n").await?;
+    stdout.flush().await?;
+    Ok(())
+}
+
 pub async fn run() -> Result<(), CliError> {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
-    let mut stdout = tokio::io::stdout();
+    let stdout = Arc::new(Mutex::new(tokio::io::stdout()));
+    let pending = Arc::new(Mutex::new(HashMap::<String, oneshot::Sender<()>>::new()));
+    let completed = Arc::new(Notify::new());
     while let Some(line) = lines.next_line().await? {
         if line.trim().is_empty() {
             continue;
         }
         let output = match serde_json::from_str::<Request>(&line) {
             Ok(request) => {
+                if request.method == "notifications/cancelled" {
+                    if let Some(request_id) = request.params.get("requestId") {
+                        let key = serde_json::to_string(request_id)?;
+                        if let Some(cancel) = pending.lock().await.remove(&key) {
+                            let _ = cancel.send(());
+                        }
+                    }
+                    continue;
+                }
+                if request.method == "tools/call"
+                    && let Some(id) = request.id.clone()
+                {
+                    let key = serde_json::to_string(&id)?;
+                    let (cancel, mut cancelled) = oneshot::channel();
+                    pending.lock().await.insert(key.clone(), cancel);
+                    let stdout = Arc::clone(&stdout);
+                    let pending = Arc::clone(&pending);
+                    let completed = Arc::clone(&completed);
+                    tokio::spawn(async move {
+                        let output = tokio::select! {
+                            _ = &mut cancelled => None,
+                            result = handle(request) => match result {
+                                Ok(output) => output,
+                                Err(e) => Some(error(id, -32603, format!("Internal error: {e}"))),
+                            },
+                        };
+                        if let Some(output) = output {
+                            let _ = write_response(&stdout, &output).await;
+                        }
+                        pending.lock().await.remove(&key);
+                        completed.notify_waiters();
+                    });
+                    continue;
+                }
                 let id = request.id.clone().unwrap_or(Value::Null);
                 match handle(request).await {
                     Ok(output) => output,
@@ -241,12 +314,15 @@ pub async fn run() -> Result<(), CliError> {
             Err(e) => Some(error(Value::Null, -32700, format!("Parse error: {e}"))),
         };
         if let Some(output) = output {
-            stdout
-                .write_all(serde_json::to_string(&output)?.as_bytes())
-                .await?;
-            stdout.write_all(b"\n").await?;
-            stdout.flush().await?;
+            write_response(&stdout, &output).await?;
         }
+    }
+    loop {
+        let notified = completed.notified();
+        if pending.lock().await.is_empty() {
+            break;
+        }
+        notified.await;
     }
     Ok(())
 }

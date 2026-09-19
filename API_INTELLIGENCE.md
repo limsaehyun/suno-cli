@@ -122,6 +122,11 @@ metadata: { tags, prompt, duration, avg_bpm, min_bpm, max_bpm,
             can_remix, priority, stream, uses_latest_model }
 ```
 
+Current V6 clips may return `/api/forbidden` in `audio_url` and an encoded
+`m4a-opus` progressive entry in `media_urls`. `POST /api/mango/rights` with
+`{"content_params":{"content_id":"<clip-id>","content_type":"clip"}}`
+returns the per-clip material used by Suno's player to unwrap and decrypt it.
+
 ### GET /api/playlist/me
 User's playlists. Returns `{"num_total_results": N, "current_page": N, "playlists": [...]}`
 

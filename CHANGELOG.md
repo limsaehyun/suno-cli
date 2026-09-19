@@ -25,7 +25,7 @@ Fork of paperfoot/suno-cli with support for Suno's v6 model family (launched 202
 
 **Fixed:**
 
-- V6 Mini downloads use the current unencrypted progressive entry in `media_urls` when Suno returns `/api/forbidden` in the legacy `audio_url` field.
+- V6 downloads decrypt the current encoded `media_urls` entry and preserve its M4A container when Suno returns `/api/forbidden` in the legacy `audio_url` field.
 
 ## v0.8.0 — the composer and the renderer agree about the artifact
 

@@ -249,21 +249,29 @@ async fn handle_generation(
         if let Some(dir) = download_dir {
             for clip in &final_clips {
                 if clip.status == "complete" {
-                    let path = download::download_clip(clip, dir, false).await?;
+                    let path = download::download_clip(c, clip, dir, false).await?;
 
-                    // Embed lyrics into MP3
-                    let plain_lyrics = clip.metadata.prompt.as_deref();
-                    // Try to get timed lyrics for synced display
-                    let aligned = c.aligned_lyrics(&clip.id).await.ok();
-                    download::embed_lyrics_in_mp3(
-                        &path,
-                        &clip.title,
-                        plain_lyrics,
-                        aligned.as_deref(),
-                    )?;
+                    let is_mp3 = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"));
+                    if is_mp3 {
+                        let plain_lyrics = clip.metadata.prompt.as_deref();
+                        let aligned = c.aligned_lyrics(&clip.id).await.ok();
+                        download::embed_lyrics_in_mp3(
+                            &path,
+                            &clip.title,
+                            plain_lyrics,
+                            aligned.as_deref(),
+                        )?;
+                    }
 
                     if !quiet {
-                        eprintln!("Downloaded: {path} (lyrics embedded)");
+                        if is_mp3 {
+                            eprintln!("Downloaded: {path} (lyrics embedded)");
+                        } else {
+                            eprintln!("Downloaded: {path}");
+                        }
                     }
                 }
             }
@@ -845,8 +853,12 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 // Download + lyric-embed per clip; one bad clip (still
                 // streaming, deleted mid-batch) must not sink the rest.
                 let result: Result<String, CliError> = async {
-                    let path = download::download_clip(clip, &out_dir, args.video).await?;
-                    if !args.video {
+                    let path = download::download_clip(&c, clip, &out_dir, args.video).await?;
+                    let is_mp3 = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"));
+                    if is_mp3 {
                         let plain_lyrics = clip.metadata.prompt.as_deref();
                         let aligned = c.aligned_lyrics(&clip.id).await.ok();
                         download::embed_lyrics_in_mp3(

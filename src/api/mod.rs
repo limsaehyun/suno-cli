@@ -18,6 +18,7 @@ use reqwest::Client;
 
 use crate::auth::{self, AuthState};
 use crate::errors::CliError;
+use types::MediaRights;
 
 pub struct SunoClient {
     client: Client,
@@ -94,11 +95,36 @@ impl SunoClient {
             .headers(self.headers())
     }
 
+    pub(crate) async fn media_rights(
+        &self,
+        clip_id: &str,
+    ) -> Result<(MediaRights, String), CliError> {
+        let body = serde_json::json!({
+            "content_params": {"content_id": clip_id, "content_type": "clip"}
+        });
+        self.with_auth_retry(|| async {
+            let (jwt, device) = self.auth_snapshot();
+            let jwt = jwt.ok_or(CliError::AuthMissing)?;
+            let resp = self
+                .client
+                .post(format!("{BASE_URL}/api/mango/rights"))
+                .headers(Self::headers_for(Some(&jwt), &device))
+                .json(&body)
+                .send()
+                .await?;
+            let resp = self.check_response(resp).await?;
+            Ok((resp.json::<MediaRights>().await?, jwt))
+        })
+        .await
+    }
+
     fn headers(&self) -> reqwest::header::HeaderMap {
-        let mut headers = reqwest::header::HeaderMap::new();
-        // Lock briefly, clone the strings we need, drop the guard before
-        // touching the header map. Never hold the lock across an await.
-        let (jwt, device) = {
+        let (jwt, device) = self.auth_snapshot();
+        Self::headers_for(jwt.as_deref(), &device)
+    }
+
+    fn auth_snapshot(&self) -> (Option<String>, String) {
+        {
             let auth = self.auth.lock().expect("auth mutex poisoned");
             (
                 auth.jwt.clone(),
@@ -106,7 +132,11 @@ impl SunoClient {
                     .clone()
                     .unwrap_or_else(|| "00000000-0000-0000-0000-000000000000".to_string()),
             )
-        };
+        }
+    }
+
+    fn headers_for(jwt: Option<&str>, device: &str) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
         if let Some(jwt) = jwt
             && let Ok(val) = format!("Bearer {jwt}").parse()
         {

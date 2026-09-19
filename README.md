@@ -182,12 +182,15 @@ suno models          List available models with limits
 ### Manage
 
 ```
-suno download <ids>  Download audio/video with embedded lyrics
+suno download <ids>  Download audio/video; MP3 output includes embedded lyrics
 suno delete <ids>    Move clips to trash (-y to confirm; --restore undoes it)
 suno set <id>        Update title, lyrics, caption, or remove cover
 suno publish <ids>   Toggle public/private visibility
 suno timed-lyrics    Get word-level timestamped lyrics (--lrc for LRC format)
 ```
+
+Current V6 audio is downloaded as decrypted Opus-in-M4A. Older MP3 output keeps
+its ID3 title and lyric embedding.
 
 ### Config, Auth & Tooling
 

@@ -63,3 +63,28 @@ fn stdio_mcp_rejects_unknown_arguments() {
             .contains("unknown field")
     );
 }
+
+#[test]
+fn stdio_mcp_enforces_generation_schema_constraints() {
+    let input = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"suno_generate","arguments":{"title":"Preview","tags":"ambient","model":"v5.5","duration":9,"dry_run":true}}}"#;
+    let output = suno().arg("mcp").write_stdin(input).output().unwrap();
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["result"]["isError"], true);
+    assert!(
+        response["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("model must be")
+    );
+}
+
+#[test]
+fn stdio_mcp_reports_unknown_tools_as_protocol_errors() {
+    let input = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"unknown","arguments":{}}}"#;
+    let output = suno().arg("mcp").write_stdin(input).output().unwrap();
+    assert!(output.status.success());
+    let response: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(response["id"], 7);
+    assert_eq!(response["error"]["code"], -32602);
+}

@@ -1,6 +1,6 @@
 ---
 name: suno
-description: The complete Suno tool — write and generate AI music from the terminal with the `suno` CLI. Use when the user asks to generate/make/create a song, music, a track, or audio; to write a song or lyrics for Suno; for catchy/viral/earworm hooks; for covers, remasters, stems, or voice personas; to download Suno songs (auto-embeds lyrics into MP3); or for priming/subliminal/charm/research songs — "prime [name] to [action]", subliminal song, charm round, research priming, or a song "for the paper". `suno write` scaffolds the song from a built-in grammar, `suno generate` renders the audio. Run `suno agent-info` for the full machine-readable capability dump.
+description: The complete Suno tool — write and generate AI music from the terminal with the `suno` CLI. Use when the user asks to generate/make/create a song, music, a track, or audio; to write a song or lyrics for Suno; for catchy/viral/earworm hooks; for covers, remasters, stems, or voice personas; to decrypt and download Suno songs (auto-embeds lyrics into MP3 output); or for priming/subliminal/charm/research songs — "prime [name] to [action]", subliminal song, charm round, research priming, or a song "for the paper". `suno write` scaffolds the song from a built-in grammar, `suno generate` renders the audio. Run `suno agent-info` for the full machine-readable capability dump.
 ---
 
 # suno CLI

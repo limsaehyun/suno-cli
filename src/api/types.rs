@@ -103,11 +103,21 @@ pub struct Clip {
 }
 
 impl Clip {
-    pub fn audio_download_url(&self) -> Option<&str> {
+    pub fn audio_download_media(&self) -> Option<&ClipMediaUrl> {
         self.media_urls
             .iter()
-            .find(|media| !media.encrypted && media.delivery.as_deref() == Some("progressive"))
-            .or_else(|| self.media_urls.iter().find(|media| !media.encrypted))
+            .find(|media| !media.is_encrypted() && media.delivery.as_deref() == Some("progressive"))
+            .or_else(|| {
+                self.media_urls
+                    .iter()
+                    .find(|media| media.delivery.as_deref() == Some("progressive"))
+            })
+            .or_else(|| self.media_urls.iter().find(|media| !media.is_encrypted()))
+            .or_else(|| self.media_urls.first())
+    }
+
+    pub fn audio_download_url(&self) -> Option<&str> {
+        self.audio_download_media()
             .map(|media| media.url.as_str())
             .or_else(|| {
                 self.audio_url
@@ -124,6 +134,22 @@ pub struct ClipMediaUrl {
     pub encrypted: bool,
     #[serde(default)]
     pub delivery: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
+}
+
+impl ClipMediaUrl {
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted || self.encoding.is_some()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MediaRights {
+    pub key: String,
+    pub iv: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -501,7 +527,7 @@ mod tests {
             "model_name": "chirp-goose",
             "audio_url": "https://studio-api.prod.suno.com/api/forbidden",
             "media_urls": [
-                {"url": "https://example.com/encrypted", "encrypted": true, "delivery": "streaming"},
+                {"url": "https://example.com/encrypted.m4a", "encoding": "1.0.0", "content_type": "m4a-opus", "delivery": "progressive"},
                 {"url": "https://example.com/audio.mp3", "encrypted": false, "delivery": "progressive"}
             ],
             "video_url": null,
@@ -514,6 +540,7 @@ mod tests {
             clip.audio_download_url(),
             Some("https://example.com/audio.mp3")
         );
+        assert!(clip.media_urls[0].is_encrypted());
     }
 
     #[test]
