@@ -18,24 +18,32 @@
 
 ## Models (from /api/billing/info/)
 
+Read-only account response rechecked 2026-09-11 (v6 launch). Availability and defaults are account-specific.
+
 | Display Name | External Key | Default | Max Prompt | Max Tags | Max Neg Tags | Max GPT Desc |
 |---|---|---|---|---|---|---|
-| **v5.5** | `chirp-fenix` | **YES** | 5000 | 1000 | 1000 | 500 |
-| v5 | `chirp-crow` | No | 5000 | 1000 | 1000 | 500 |
-| v4.5+ | `chirp-bluejay` | No | 5000 | 1000 | 1000 | 500 |
-| v4.5 | `chirp-auk` | No | 5000 | 1000 | 1000 | 500 |
-| v4.5-all | `chirp-auk-turbo` | Free default | 5000 | 1000 | 1000 | 500 |
-| v4 | `chirp-v4` | No | 3000 | 200 | 1000 | 500 |
-| v3.5 | `chirp-v3-5` | No | 3000 | 200 | 1000 | 500 |
-| v3 | `chirp-v3-0` | No | 1250 | 200 | 1000 | 500 |
-| v2 | `chirp-v2-xxl-alpha` | No | 1250 | 200 | 1000 | 500 |
+| **v6** | `chirp-hawk` | **YES** | 5000 | 1000 | 1000 | 3000 |
+| v6-wild | `chirp-hawk-wild` | No | 5000 | 1000 | 1000 | 3000 |
+| v6-mini | `chirp-goose` | No | 5000 | 1000 | 1000 | 3000 |
+| v5.5 | `chirp-fenix` | No | 5000 | 1000 | 1000 | 3000 |
+| v5 | `chirp-crow` | No | 5000 | 1000 | 1000 | 3000 |
+| v4.5+ | `chirp-bluejay` | No | 5000 | 1000 | 1000 | 3000 |
+| v4.5 | `chirp-auk` | No | 5000 | 1000 | 1000 | 3000 |
+| v4.5-all | `chirp-auk-turbo` | Free model | 5000 | 1000 | 1000 | 3000 |
+| v4 | `chirp-v4` | No | 3000 | 200 | 1000 | 3000 |
+| v3.5 | `chirp-v3-5` | No | 3000 | 200 | 1000 | 3000 |
+| v3 | `chirp-v3-0` | No | 3000 | 200 | 1000 | 3000 |
+| v2 | `chirp-v2-xxl-alpha` | No | 3000 | 200 | 1000 | 3000 |
 
 ### Remaster Models
 | Name | Key |
 |---|---|
-| v5.5 (default) | `chirp-flounder` |
+| v6 (default) | `chirp-halibut` |
+| v5.5 | `chirp-flounder` |
 | v5 | `chirp-carp` |
 | v4.5+ | `chirp-bass` |
+
+v6 remaster (`chirp-halibut`) posts `variation_category` (`subtle` \| `normal` \| `high`, default `normal`) and `style_profile` (`natural` \| `boost` \| `clarity`, default `boost`) to `POST /api/generate/upsample`. v5.5/v5 send variation only; v4.5+ omits both.
 
 ## Verified Endpoints
 
@@ -80,7 +88,14 @@ Returns full account info, credits, plan, models, features, limits.
 }
 ```
 
-**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. Do **not** send a `token_provider` field: the v2-web endpoint 422s on the string (verified 2026; the CLI dropped it), so only `token` rides on the request body. Whether a captcha is needed at all is answered by the preflight below.
+**v6 Custom additions** (live 2026-09-11; omitted unless the caller sets them):
+- top-level `duration`: whole seconds 10–360. Current Web default is 180 when omitted. Description mode does not expose duration (the server ignores or does not honor it).
+- `metadata.control_sliders.aug_creativity`: whole number 0–4 (Variety). Fractions return HTTP 400.
+- `metadata.is_mumble` / `metadata.is_max_mode`: already in the metadata block. v6 gates these on `/api/session/` flags `mumble-mode` and `max-mode`; the CLI sends the flags when requested and Suno remains authoritative.
+
+Default `mv` is now `chirp-hawk` (v6). `chirp-hawk-wild` and `chirp-goose` are the wild and mini variants.
+
+**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. The current web client includes `token_provider: null`; a provider name string is not accepted. Whether a captcha is needed at all is answered by the preflight below.
 
 ### POST /api/c/check
 **Captcha preflight** (verified live 2026-07-18 on both `studio-api-prod.suno.com` and `studio-api.prod.suno.com`). Request: `{"ctype": "generation"}` with Bearer JWT. Response: `{"required": false, "captcha_version": 1}` — `required` is false for accounts above Suno's trust threshold, so the solver can be skipped entirely. When `required` is true, generating one song in the suno.com UI clears the challenge.
@@ -100,12 +115,17 @@ Concatenate/extend clips. `{"clip_id": "<id>"}`
 
 Clip structure:
 ```
-id, title, status, model_name, audio_url, audio_url_2, video_url,
+id, title, status, model_name, audio_url, audio_url_2, media_urls, video_url,
 image_url, image_large_url, created_at, play_count, upvote_count,
 metadata: { tags, prompt, duration, avg_bpm, min_bpm, max_bpm,
             has_stem, is_mumble, is_remix, make_instrumental, type,
             can_remix, priority, stream, uses_latest_model }
 ```
+
+Current V6 clips may return `/api/forbidden` in `audio_url` and an encoded
+`m4a-opus` progressive entry in `media_urls`. `POST /api/mango/rights` with
+`{"content_params":{"content_id":"<clip-id>","content_type":"clip"}}`
+returns the per-clip material used by Suno's player to unwrap and decrypt it.
 
 ### GET /api/playlist/me
 User's playlists. Returns `{"num_total_results": N, "current_page": N, "playlists": [...]}`

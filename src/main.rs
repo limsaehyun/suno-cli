@@ -7,6 +7,7 @@ mod config;
 mod download;
 mod errors;
 mod guard;
+mod mcp;
 mod output;
 
 use clap::Parser;
@@ -34,7 +35,7 @@ fn resolve_model(
             <ModelVersion as clap::ValueEnum>::from_str(&cfg.default_model, true).map_err(|_| {
                 CliError::Config(format!(
                     "config default_model '{}' is not a valid --model value — \
-                     fix it with `suno config set default_model v5.5`",
+                     fix it with `suno config set default_model v6`",
                     cfg.default_model
                 ))
             })
@@ -48,6 +49,25 @@ fn resolve_model(
 fn read_input_file(path: &str) -> Result<String, CliError> {
     std::fs::read_to_string(path)
         .map_err(|e| CliError::InvalidInput(format!("cannot read input file '{path}': {e}")))
+}
+
+fn read_secret_from_stdin(kind: &str) -> Result<String, CliError> {
+    use std::io::{IsTerminal, Read};
+
+    if std::io::stdin().is_terminal() {
+        return Err(CliError::InvalidInput(format!(
+            "--{kind}-stdin requires piped input"
+        )));
+    }
+    let mut secret = String::new();
+    std::io::stdin().read_to_string(&mut secret)?;
+    let secret = secret.trim().to_string();
+    if secret.is_empty() {
+        return Err(CliError::InvalidInput(format!(
+            "--{kind}-stdin received empty input"
+        )));
+    }
+    Ok(secret)
 }
 
 /// Credit protection shared by every command that sends lyrics into the
@@ -91,16 +111,42 @@ fn build_control_sliders(
     weirdness: Option<f64>,
     style_influence: Option<f64>,
     audio_influence: Option<f64>,
-) -> Option<ControlSliders> {
-    if weirdness.is_none() && style_influence.is_none() && audio_influence.is_none() {
-        return None;
+    variety: Option<u8>,
+) -> Result<Option<ControlSliders>, CliError> {
+    if let Some(v) = variety
+        && v > 4
+    {
+        return Err(CliError::InvalidInput(
+            "--variety must be a whole number from 0 to 4".into(),
+        ));
     }
-    Some(ControlSliders {
+    if weirdness.is_none()
+        && style_influence.is_none()
+        && audio_influence.is_none()
+        && variety.is_none()
+    {
+        return Ok(None);
+    }
+    Ok(Some(ControlSliders {
         // Normalize 0-100 → 0.0-1.0
         weirdness_constraint: weirdness.map(|w| (w / 100.0).clamp(0.0, 1.0)),
         style_weight: style_influence.map(|s| (s / 100.0).clamp(0.0, 1.0)),
         audio_weight: audio_influence.map(|a| (a / 100.0).clamp(0.0, 1.0)),
-    })
+        aug_creativity: variety,
+    }))
+}
+
+/// v6 Custom duration: whole seconds from 10 through 360. The current Web
+/// default of 180s is used when this is omitted, so we don't send a value
+/// unless the caller asked for one.
+fn validate_duration(duration: Option<u32>) -> Result<Option<u32>, CliError> {
+    match duration {
+        None => Ok(None),
+        Some(n) if (10..=360).contains(&n) => Ok(Some(n)),
+        Some(n) => Err(CliError::InvalidInput(format!(
+            "--duration must be a whole number of seconds from 10 to 360, got {n}"
+        ))),
+    }
 }
 
 /// Resolve the captcha token for the five captcha-gated v2-web commands
@@ -203,21 +249,29 @@ async fn handle_generation(
         if let Some(dir) = download_dir {
             for clip in &final_clips {
                 if clip.status == "complete" {
-                    let path = download::download_clip(clip, dir, false).await?;
+                    let path = download::download_clip(c, clip, dir, false).await?;
 
-                    // Embed lyrics into MP3
-                    let plain_lyrics = clip.metadata.prompt.as_deref();
-                    // Try to get timed lyrics for synced display
-                    let aligned = c.aligned_lyrics(&clip.id).await.ok();
-                    download::embed_lyrics_in_mp3(
-                        &path,
-                        &clip.title,
-                        plain_lyrics,
-                        aligned.as_deref(),
-                    )?;
+                    let is_mp3 = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"));
+                    if is_mp3 {
+                        let plain_lyrics = clip.metadata.prompt.as_deref();
+                        let aligned = c.aligned_lyrics(&clip.id).await.ok();
+                        download::embed_lyrics_in_mp3(
+                            &path,
+                            &clip.title,
+                            plain_lyrics,
+                            aligned.as_deref(),
+                        )?;
+                    }
 
                     if !quiet {
-                        eprintln!("Downloaded: {path} (lyrics embedded)");
+                        if is_mp3 {
+                            eprintln!("Downloaded: {path} (lyrics embedded)");
+                        } else {
+                            eprintln!("Downloaded: {path}");
+                        }
                     }
                 }
             }
@@ -286,8 +340,20 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 Err(e) => return Err(e),
             };
 
+            let stdin_jwt = if args.jwt_stdin {
+                Some(read_secret_from_stdin("jwt")?)
+            } else {
+                None
+            };
+            let stdin_cookie = if args.cookie_stdin {
+                Some(read_secret_from_stdin("cookie")?)
+            } else {
+                None
+            };
+            let supplied_jwt = args.jwt.as_ref().or(stdin_jwt.as_ref());
+            let supplied_cookie = args.cookie.as_ref().or(stdin_cookie.as_ref());
             let has_explicit_auth_input =
-                args.login || args.refresh || args.jwt.is_some() || args.cookie.is_some();
+                args.login || args.refresh || supplied_jwt.is_some() || supplied_cookie.is_some();
             let should_login = args.login
                 || (!has_explicit_auth_input
                     && state.jwt.is_none()
@@ -326,7 +392,6 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 let (session_id, jwt) =
                     auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-                state.cookie = Some(browser_auth.cookie_header);
                 state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
                 state.session_id = Some(session_id);
                 state.jwt = Some(jwt);
@@ -334,7 +399,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     .device_id
                     .or(state.device_id)
                     .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
-            } else if let Some(cookie) = args.cookie.as_deref() {
+            } else if let Some(cookie) = supplied_cookie.map(String::as_str) {
                 // Manual: user provides a full Cookie header or raw Clerk __client value.
                 let browser_auth = auth::normalize_cookie_input(cookie)?;
                 let http = reqwest::Client::new();
@@ -342,7 +407,6 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 let (session_id, jwt) =
                     auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-                state.cookie = Some(browser_auth.cookie_header);
                 state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
                 state.session_id = Some(session_id);
                 state.jwt = Some(jwt);
@@ -350,7 +414,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     .device_id
                     .or(state.device_id)
                     .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
-            } else if let Some(jwt) = args.jwt.clone() {
+            } else if let Some(jwt) = supplied_jwt.cloned() {
                 // Legacy: direct JWT paste (expires in ~1 hour)
                 state.jwt = Some(jwt);
                 if state.device_id.is_none() {
@@ -367,8 +431,8 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             // Verify
             let should_save_after_verify = args.refresh
                 || should_login
-                || args.cookie.is_some()
-                || args.jwt.is_some()
+                || supplied_cookie.is_some()
+                || supplied_jwt.is_some()
                 || args.device.is_some();
             let client = SunoClient::new_with_refresh(state.clone()).await?;
             let info = client.billing_info().await?;
@@ -476,14 +540,33 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             };
             reject_unfilled_scaffold(lyrics.as_deref(), args.force)?;
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
-            let control_sliders =
-                build_control_sliders(args.weirdness, args.style_influence, args.audio_influence);
-
-            // Guard before any credit is spent or Chrome piloted.
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generate");
-            guard.acquire(args.force)?;
-
-            let c = client().await?;
+            let control_sliders = build_control_sliders(
+                args.weirdness,
+                args.style_influence,
+                args.audio_influence,
+                args.variety,
+            )?;
+            let duration = validate_duration(args.duration)?;
+            if duration.is_some() && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--duration is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.variety.is_some() && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--variety is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.mumble && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--mumble is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.max_mode && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--max-mode is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
 
             // Build the new v2-web request shape. Persona generation routes
             // through the same endpoint with persona_id set; the legacy
@@ -495,7 +578,27 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.negative_tags = args.exclude.unwrap_or_default();
             req.make_instrumental = args.instrumental;
             req.persona_id = args.persona.clone();
+            req.duration = duration;
+            req.metadata.is_mumble = args.mumble;
+            req.metadata.is_max_mode = args.max_mode;
             req.metadata.control_sliders = control_sliders;
+
+            if args.dry_run {
+                let preview = serde_json::json!({
+                    "dry_run": true,
+                    "operation": "generate",
+                    "request": req,
+                });
+                match fmt {
+                    OutputFormat::Json => output::json::success(preview),
+                    OutputFormat::Table => println!("{}", serde_json::to_string_pretty(&preview)?),
+                }
+                return Ok(());
+            }
+
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
+            guard.acquire(args.force)?;
+            let c = client().await?;
 
             req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
@@ -527,9 +630,25 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
             let tags = build_tags(args.tags.as_deref(), args.vocal.as_ref());
-            let control_sliders = build_control_sliders(args.weirdness, args.style_influence, None);
+            let control_sliders =
+                build_control_sliders(args.weirdness, args.style_influence, None, args.variety)?;
+            if args.variety.is_some() && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--variety is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.mumble && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--mumble is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
+            if args.max_mode && !model.is_v6_family() {
+                return Err(CliError::InvalidInput(
+                    "--max-mode is a v6 control (v6, v6-wild, v6-mini)".into(),
+                ));
+            }
 
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "describe");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
 
             // The v2-web schema dropped `gpt_description_prompt` — inspiration
@@ -540,6 +659,8 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.tags = tags;
             req.make_instrumental = args.instrumental;
             req.persona_id = args.persona.clone();
+            req.metadata.is_mumble = args.mumble;
+            req.metadata.is_max_mode = args.max_mode;
             req.metadata.control_sliders = control_sliders;
 
             let c = client().await?;
@@ -569,7 +690,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             // so it gets the same scaffold preflight and duplicate guard
             // before any credit is spent.
             reject_unfilled_scaffold(args.lyrics.as_deref(), args.force)?;
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "extend");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
 
             let mut req = GenerateRequest::new(model.to_api_key(), "custom");
@@ -596,12 +717,12 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Cover(args) => {
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
 
             let c = client().await?;
             let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
-            let control_sliders = build_control_sliders(None, None, args.audio_influence);
+            let control_sliders = build_control_sliders(None, None, args.audio_influence, None)?;
 
             if !cli.quiet {
                 eprintln!("Creating cover ({})...", model.display_name());
@@ -629,17 +750,35 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
 
         Commands::Remaster(args) => {
             let cfg = config::AppConfig::load()?;
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "remaster");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
+            if args.variation.is_some() && !args.model.supports_variation() {
+                return Err(CliError::InvalidInput(
+                    "--variation is not supported by the v4.5+ remaster model".into(),
+                ));
+            }
+            if args.style_profile.is_some() && !args.model.supports_style_profile() {
+                return Err(CliError::InvalidInput(
+                    "--style-profile is supported only by the v6 remaster model".into(),
+                ));
+            }
 
             let c = client().await?;
-            let token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
+            // Upsample does not take a captcha token; still honor --no-captcha
+            // by skipping the solver, and run preflight otherwise so a gated
+            // account surfaces the same Chrome path as generate.
+            let _token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
             if !cli.quiet {
                 eprintln!("Remastering with {}...", args.model.to_api_key());
             }
             let clips = c
-                .remaster(&args.clip_id, args.model.to_api_key(), token)
+                .remaster(
+                    &args.clip_id,
+                    args.model.to_api_key(),
+                    args.variation.map(|v| v.as_str()),
+                    args.style_profile.map(|s| s.as_str()),
+                )
                 .await?;
             handle_generation(
                 &c,
@@ -714,8 +853,12 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 // Download + lyric-embed per clip; one bad clip (still
                 // streaming, deleted mid-batch) must not sink the rest.
                 let result: Result<String, CliError> = async {
-                    let path = download::download_clip(clip, &out_dir, args.video).await?;
-                    if !args.video {
+                    let path = download::download_clip(&c, clip, &out_dir, args.video).await?;
+                    let is_mp3 = std::path::Path::new(&path)
+                        .extension()
+                        .and_then(|ext| ext.to_str())
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("mp3"));
+                    if is_mp3 {
                         let plain_lyrics = clip.metadata.prompt.as_deref();
                         let aligned = c.aligned_lyrics(&clip.id).await.ok();
                         download::embed_lyrics_in_mp3(
@@ -960,15 +1103,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             }
         }
 
-        Commands::Update(args) => {
-            // self_update drives blocking reqwest, which refuses to run on the
-            // async runtime thread (panics under debug_assertions) — hop to a
-            // blocking thread.
-            let (check, force, quiet) = (args.check, args.force, cli.quiet);
-            tokio::task::spawn_blocking(move || commands::update::run(check, force, fmt, quiet))
-                .await
-                .map_err(|e| CliError::Update(format!("update task failed: {e}")))??
-        }
+        Commands::Update(args) => commands::update::run(args.check, args.force, fmt, cli.quiet)?,
+
+        Commands::Mcp => mcp::run().await?,
 
         Commands::Contract { code } => commands::contract::run(fmt, code)?,
 
@@ -1048,19 +1185,43 @@ mod tests {
 
     #[test]
     fn control_sliders_normalize_and_clamp() {
-        let s = build_control_sliders(Some(50.0), Some(150.0), Some(0.0)).unwrap();
+        let s = build_control_sliders(Some(50.0), Some(150.0), Some(0.0), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(s.weirdness_constraint, Some(0.5));
         // Out-of-range input clamps rather than sending >1.0 to the API.
         assert_eq!(s.style_weight, Some(1.0));
         assert_eq!(s.audio_weight, Some(0.0));
 
         // No flags → no block at all, so the request stays clean.
-        assert!(build_control_sliders(None, None, None).is_none());
+        assert!(
+            build_control_sliders(None, None, None, None)
+                .unwrap()
+                .is_none()
+        );
 
         // A lone --audio-influence still produces a block.
-        let s = build_control_sliders(None, None, Some(65.0)).unwrap();
+        let s = build_control_sliders(None, None, Some(65.0), None)
+            .unwrap()
+            .unwrap();
         assert_eq!(s.audio_weight, Some(0.65));
         assert_eq!(s.weirdness_constraint, None);
+
+        // Variety is a whole number 0–4, not a 0–100 slider.
+        let s = build_control_sliders(None, None, None, Some(3))
+            .unwrap()
+            .unwrap();
+        assert_eq!(s.aug_creativity, Some(3));
+        assert!(build_control_sliders(None, None, None, Some(5)).is_err());
+    }
+
+    #[test]
+    fn duration_accepts_v6_custom_range() {
+        assert_eq!(validate_duration(None).unwrap(), None);
+        assert_eq!(validate_duration(Some(10)).unwrap(), Some(10));
+        assert_eq!(validate_duration(Some(360)).unwrap(), Some(360));
+        assert!(validate_duration(Some(9)).is_err());
+        assert!(validate_duration(Some(361)).is_err());
     }
 
     #[test]

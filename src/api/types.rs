@@ -89,6 +89,8 @@ pub struct Clip {
     pub status: String,
     pub model_name: String,
     pub audio_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub media_urls: Vec<ClipMediaUrl>,
     pub video_url: Option<String>,
     pub image_url: Option<String>,
     pub created_at: String,
@@ -98,6 +100,56 @@ pub struct Clip {
     pub upvote_count: u64,
     #[serde(default)]
     pub metadata: ClipMetadata,
+}
+
+impl Clip {
+    pub fn audio_download_media(&self) -> Option<&ClipMediaUrl> {
+        self.media_urls
+            .iter()
+            .find(|media| !media.is_encrypted() && media.delivery.as_deref() == Some("progressive"))
+            .or_else(|| {
+                self.media_urls
+                    .iter()
+                    .find(|media| media.delivery.as_deref() == Some("progressive"))
+            })
+            .or_else(|| self.media_urls.iter().find(|media| !media.is_encrypted()))
+            .or_else(|| self.media_urls.first())
+    }
+
+    pub fn audio_download_url(&self) -> Option<&str> {
+        self.audio_download_media()
+            .map(|media| media.url.as_str())
+            .or_else(|| {
+                self.audio_url
+                    .as_deref()
+                    .filter(|url| !url.ends_with("/api/forbidden"))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClipMediaUrl {
+    pub url: String,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub delivery: Option<String>,
+    #[serde(default)]
+    pub content_type: Option<String>,
+    #[serde(default)]
+    pub encoding: Option<String>,
+}
+
+impl ClipMediaUrl {
+    pub fn is_encrypted(&self) -> bool {
+        self.encrypted || self.encoding.is_some()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MediaRights {
+    pub key: String,
+    pub iv: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -176,9 +228,10 @@ pub struct FilterPresence {
 pub struct GenerateRequest {
     /// Captcha/anti-bot token. Only needed when `/api/c/check` says the
     /// account is captcha-gated; `null` otherwise (matches the web app).
-    /// No companion `token_provider` field: Suno's v2-web schema types it as
-    /// an integer and 422s on a string, and the hCaptcha flow works without it.
     pub token: Option<String>,
+    /// The current web client always includes this key. `null` means the
+    /// captcha token was produced by Suno's built-in flow.
+    pub token_provider: Option<String>,
     pub generation_type: String,
     pub title: Option<String>,
     pub tags: Option<String>,
@@ -187,6 +240,11 @@ pub struct GenerateRequest {
     pub mv: String,
     pub prompt: String,
     pub make_instrumental: bool,
+    /// Target length in seconds. Current Web sends this for v6 Custom
+    /// (10–360, default 180 when omitted). Skip when unset so older models
+    /// keep their previous payload shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<u32>,
     pub user_uploaded_images_b64: Option<String>,
     pub metadata: GenerateMetadata,
     /// Always present, empty array unless overriding model fields.
@@ -201,6 +259,10 @@ pub struct GenerateRequest {
     pub continue_clip_id: Option<String>,
     pub continued_aligned_prompt: Option<String>,
     pub continue_at: Option<f64>,
+    pub edit_session_id: Option<String>,
+    pub project_id: Option<String>,
+    pub lyrics_project_id: Option<String>,
+    pub lyricist_id: Option<String>,
     /// Random UUID generated per request — required.
     pub transaction_uuid: String,
 }
@@ -212,6 +274,7 @@ impl GenerateRequest {
     pub fn new(mv: &str, create_mode: &str) -> Self {
         Self {
             token: None,
+            token_provider: None,
             generation_type: "TEXT".to_string(),
             title: None,
             tags: None,
@@ -219,6 +282,7 @@ impl GenerateRequest {
             mv: mv.to_string(),
             prompt: String::new(),
             make_instrumental: false,
+            duration: None,
             user_uploaded_images_b64: None,
             metadata: GenerateMetadata::new(create_mode),
             override_fields: Vec::new(),
@@ -232,6 +296,10 @@ impl GenerateRequest {
             continue_clip_id: None,
             continued_aligned_prompt: None,
             continue_at: None,
+            edit_session_id: None,
+            project_id: None,
+            lyrics_project_id: None,
+            lyricist_id: None,
             transaction_uuid: uuid::Uuid::new_v4().to_string(),
         }
     }
@@ -285,6 +353,10 @@ pub struct ControlSliders {
     /// source audio shapes covers/remixes. Field name confirmed in the wild.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub audio_weight: Option<f64>,
+    /// Variety slider. Whole number 0–4. Live v6 submissions 2026-09-11
+    /// preserved integers and rejected fractions with HTTP 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aug_creativity: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -374,6 +446,23 @@ pub struct ConcatRequest {
     pub clip_id: String,
 }
 
+// --- Remaster (POST /api/generate/upsample) ---
+//
+// Current web remaster route, recaptured 2026-09-11. v6 `chirp-halibut`
+// sends both `variation_category` (subtle|normal|high, default normal) and
+// `style_profile` (natural|boost|clarity, default boost). v5.5/v5 send
+// variation only; v4.5+ (`chirp-bass`) omits both.
+
+#[derive(Debug, Serialize)]
+pub struct RemasterRequest {
+    pub clip_id: String,
+    pub model_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variation_category: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub style_profile: Option<String>,
+}
+
 // --- Persona ---
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -405,14 +494,53 @@ mod tests {
     fn generate_request_token_serialization() {
         let mut req = GenerateRequest::new("chirp-fenix", "custom");
         let v = serde_json::to_value(&req).unwrap();
-        // token is null when no captcha is required (the common case); there
-        // is no token_provider field — Suno's v2-web schema rejects it.
+        // Both keys remain present as explicit nulls when captcha is not
+        // required. This matches the current web request contract.
         assert_eq!(v["token"], serde_json::Value::Null);
-        assert!(v.get("token_provider").is_none());
+        assert_eq!(v["token_provider"], serde_json::Value::Null);
 
         req.token = Some("solved".into());
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["token"], "solved");
+    }
+
+    #[test]
+    fn generate_request_keeps_current_schema_placeholders() {
+        let req = GenerateRequest::new("chirp-hawk", "custom");
+        let v = serde_json::to_value(&req).unwrap();
+        for field in [
+            "edit_session_id",
+            "project_id",
+            "lyrics_project_id",
+            "lyricist_id",
+        ] {
+            assert_eq!(v[field], serde_json::Value::Null, "missing {field}");
+        }
+    }
+
+    #[test]
+    fn clip_prefers_decodable_media_url_over_forbidden_placeholder() {
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": "clip-id",
+            "title": "title",
+            "status": "complete",
+            "model_name": "chirp-goose",
+            "audio_url": "https://studio-api.prod.suno.com/api/forbidden",
+            "media_urls": [
+                {"url": "https://example.com/encrypted.m4a", "encoding": "1.0.0", "content_type": "m4a-opus", "delivery": "progressive"},
+                {"url": "https://example.com/audio.mp3", "encrypted": false, "delivery": "progressive"}
+            ],
+            "video_url": null,
+            "image_url": null,
+            "created_at": "2026-09-20T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            clip.audio_download_url(),
+            Some("https://example.com/audio.mp3")
+        );
+        assert!(clip.media_urls[0].is_encrypted());
     }
 
     #[test]
@@ -460,10 +588,62 @@ mod tests {
             weirdness_constraint: None,
             style_weight: None,
             audio_weight: Some(0.65),
+            aug_creativity: None,
         };
         let v = serde_json::to_value(&s).unwrap();
         assert_eq!(v["audio_weight"], 0.65);
         assert!(v.get("weirdness_constraint").is_none());
+        assert!(v.get("aug_creativity").is_none());
+    }
+
+    #[test]
+    fn generate_request_omits_duration_unless_set() {
+        let mut req = GenerateRequest::new("chirp-hawk", "custom");
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("duration").is_none());
+
+        req.duration = Some(180);
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["duration"], 180);
+        assert_eq!(v["mv"], "chirp-hawk");
+    }
+
+    #[test]
+    fn control_sliders_serialize_variety_as_whole_number() {
+        let s = ControlSliders {
+            weirdness_constraint: None,
+            style_weight: None,
+            audio_weight: None,
+            aug_creativity: Some(3),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["aug_creativity"], 3);
+        assert!(v["aug_creativity"].is_u64() || v["aug_creativity"].is_i64());
+    }
+
+    #[test]
+    fn remaster_request_omits_optional_fields() {
+        let req = RemasterRequest {
+            clip_id: "abc".into(),
+            model_name: "chirp-bass".into(),
+            variation_category: None,
+            style_profile: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["clip_id"], "abc");
+        assert_eq!(v["model_name"], "chirp-bass");
+        assert!(v.get("variation_category").is_none());
+        assert!(v.get("style_profile").is_none());
+
+        let req = RemasterRequest {
+            clip_id: "abc".into(),
+            model_name: "chirp-halibut".into(),
+            variation_category: Some("high".into()),
+            style_profile: Some("clarity".into()),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert_eq!(v["variation_category"], "high");
+        assert_eq!(v["style_profile"], "clarity");
     }
 
     #[test]

@@ -1,6 +1,6 @@
 ---
 name: suno
-description: The complete Suno tool — write and generate AI music from the terminal with the `suno` CLI. Use when the user asks to generate/make/create a song, music, a track, or audio; to write a song or lyrics for Suno; for catchy/viral/earworm hooks; for covers, remasters, stems, or voice personas; to download Suno songs (auto-embeds lyrics into MP3); or for priming/subliminal/charm/research songs — "prime [name] to [action]", subliminal song, charm round, research priming, or a song "for the paper". `suno write` scaffolds the song from a built-in grammar, `suno generate` renders the audio. Run `suno agent-info` for the full machine-readable capability dump.
+description: The complete Suno tool — write and generate AI music from the terminal with the `suno` CLI. Use when the user asks to generate/make/create a song, music, a track, or audio; to write a song or lyrics for Suno; for catchy/viral/earworm hooks; for covers, remasters, stems, or voice personas; to decrypt and download Suno songs (auto-embeds lyrics into MP3 output); or for priming/subliminal/charm/research songs — "prime [name] to [action]", subliminal song, charm round, research priming, or a song "for the paper". `suno write` scaffolds the song from a built-in grammar, `suno generate` renders the audio. Run `suno agent-info` for the full machine-readable capability dump.
 ---
 
 # suno CLI
@@ -19,7 +19,8 @@ One binary does the whole job — composing the song and rendering the audio. Al
    ```bash
    suno generate --title "..." --tags "<style_prompt>" --lyrics-file song.txt --wait --download ./songs/
    ```
-   `generate` exits 3 if any `<...>` placeholder survives, so an unfilled scaffold can never burn credits. It renders on the configured default model — v5.5, Suno's latest (~70 credits) — unless you pass `--model`.
+   `generate` exits 3 if any `<...>` placeholder survives, so an unfilled scaffold can never burn credits. It renders on the configured default model — v6, Suno's latest — unless you pass `--model`. Use `--model v6-wild` or `--model v6-mini` for the other v6 variants; `--duration`, `--variety`, `--mumble`, and `--max-mode` are v6 Custom controls.
+   Before a paid call, use the same command with `--dry-run --json` to inspect the exact request without authenticating or spending credits.
 
 ## Priming / research songs
 
@@ -33,7 +34,8 @@ Adds a chill-lounge low-arousal scaffold plus a Prime-Stack Map and research-art
 - `suno guide songwriting` — the full grammar (structure, meta-tags, genres, vocal styles, viral hooks)
 - `suno guide priming` — consent frame, evidence-graded prime library, phonetic name-embedding, quality gates
 - `suno agent-info` — machine-readable manifest: every command, flag, model, exit code, envelope shape, config key
+- `suno mcp` — local stdio MCP server; paid generation requires `confirm_spend=true`
 - `suno --help` / `suno <command> --help` — usage, tips, real examples
 - First run: `suno auth --login`, then `suno doctor` to verify
 
-Piped output is a JSON envelope automatically — `suno write > song.txt` gets JSON, not lyrics; use `--out`. `suno write` and `suno lyrics` are free; generation ≈70 credits/call on v5.5.
+Piped output is a JSON envelope automatically — `suno write > song.txt` gets JSON, not lyrics; use `--out`. `suno write` and `suno lyrics` are free; generation costs credits (v5.5 ≈70/call; v6 is plan-dependent).

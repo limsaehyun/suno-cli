@@ -1,5 +1,32 @@
 # Changelog
 
+## v0.10.0 — Suno v6
+
+Fork of paperfoot/suno-cli with support for Suno's v6 model family (launched 2026-09-09).
+
+**Added:**
+
+- Generation models `v6` (`chirp-hawk`, new default), `v6-wild` (`chirp-hawk-wild`), `v6-mini` (`chirp-goose`). API-key aliases (`chirp-hawk`, etc.) are accepted on `--model`.
+- Remaster model `v6` (`chirp-halibut`, new remaster default). Remaster now posts to the current web route `POST /api/generate/upsample` instead of the guessed v2-web `create_mode: remaster` payload.
+- `--variation subtle|normal|high` on remaster (default `normal`; rejected for v4.5+ / `chirp-bass`).
+- `--style-profile natural|boost|clarity` on remaster (v6 only; default `boost`).
+- `--duration 10..360` on `generate` for v6 Custom (omit to use Suno's 180s default).
+- `--variety 0..4` (whole-number `metadata.control_sliders.aug_creativity`), `--mumble`, and `--max-mode` on `generate` / `describe`.
+- `generate --dry-run` for inspecting the exact request without authentication or credit spend.
+- Local stdio MCP server with model, credit, and V6 generation tools. Paid calls require `confirm_spend: true`.
+- macOS Keychain and Windows Credential Manager storage for JWTs and Clerk session secrets.
+
+**Changed:**
+
+- Compiled default `default_model` is `v6`. Existing `SUNO_DEFAULT_MODEL` / config-file values still win.
+- Describe prompt limit documented as 3000 chars (v6 `gpt_description_prompt` max).
+- Generation-family commands share one cross-process lock to prevent concurrent credit spend.
+- Automatic self-update is disabled until release assets can be verified locally. Release builds publish checksums and provenance attestations.
+
+**Fixed:**
+
+- V6 downloads decrypt the current encoded `media_urls` entry and preserve its M4A container when Suno returns `/api/forbidden` in the legacy `audio_url` field.
+
 ## v0.8.0 — the composer and the renderer agree about the artifact
 
 One invariant now holds end to end: the file named by the emitted generate command exists, is directly consumable by `--lyrics-file`, contains no unresolved instructions, and reflects every selected control.

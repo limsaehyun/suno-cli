@@ -4,23 +4,113 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use indicatif::{ProgressBar, ProgressStyle};
 
+use aes::cipher::{KeyIvInit, StreamCipher};
+use aes_gcm::aead::{Aead, Payload};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce};
+use base64::Engine;
 use id3::TagLike;
+use sha2::{Digest, Sha256};
 
+use crate::api::SunoClient;
 use crate::api::types::{AlignedWord, Clip};
 use crate::errors::CliError;
 
-pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result<String, CliError> {
-    let url = if video {
-        clip.video_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no video URL available".into()))?
+enum MediaDecryptor {
+    Aes128(Box<ctr::Ctr128BE<aes::Aes128>>),
+    Aes256(Box<ctr::Ctr128BE<aes::Aes256>>),
+}
+
+impl MediaDecryptor {
+    fn new(key: &[u8], iv: &[u8]) -> Result<Self, CliError> {
+        match key.len() {
+            16 => ctr::Ctr128BE::<aes::Aes128>::new_from_slices(key, iv)
+                .map(Box::new)
+                .map(Self::Aes128)
+                .map_err(|_| CliError::Download("invalid Suno media key or IV".into())),
+            32 => ctr::Ctr128BE::<aes::Aes256>::new_from_slices(key, iv)
+                .map(Box::new)
+                .map(Self::Aes256)
+                .map_err(|_| CliError::Download("invalid Suno media key or IV".into())),
+            _ => Err(CliError::Download("unsupported Suno media key size".into())),
+        }
+    }
+
+    fn apply(&mut self, data: &mut [u8]) -> Result<(), CliError> {
+        let result = match self {
+            Self::Aes128(cipher) => cipher.try_apply_keystream(data),
+            Self::Aes256(cipher) => cipher.try_apply_keystream(data),
+        };
+        result.map_err(|_| CliError::Download("Suno media counter overflow".into()))
+    }
+}
+
+fn unwrap_media_secret(wrapped: &str, clip_id: &str, jwt: &str) -> Result<Vec<u8>, CliError> {
+    let wrapped = base64::engine::general_purpose::STANDARD
+        .decode(wrapped)
+        .map_err(|_| CliError::Download("invalid Suno media license encoding".into()))?;
+    if wrapped.len() <= 12 {
+        return Err(CliError::Download("invalid Suno media license".into()));
+    }
+    let user_key = Sha256::digest(jwt.as_bytes());
+    let cipher = Aes256Gcm::new_from_slice(&user_key)
+        .map_err(|_| CliError::Download("invalid Suno user key".into()))?;
+    cipher
+        .decrypt(
+            Nonce::from_slice(&wrapped[..12]),
+            Payload {
+                msg: &wrapped[12..],
+                aad: clip_id.as_bytes(),
+            },
+        )
+        .map_err(|_| CliError::Download("could not decrypt Suno media license".into()))
+}
+
+fn audio_extension(content_type: Option<&str>, url: &str) -> &'static str {
+    match content_type {
+        Some("m4a-opus") | Some("m4a") => "m4a",
+        Some("webm-opus") | Some("webm") => "webm",
+        Some("wav") => "wav",
+        Some("mp3") => "mp3",
+        _ if url
+            .split('?')
+            .next()
+            .is_some_and(|path| path.ends_with(".m4a")) =>
+        {
+            "m4a"
+        }
+        _ => "mp3",
+    }
+}
+
+pub async fn download_clip(
+    suno: &SunoClient,
+    clip: &Clip,
+    output_dir: &str,
+    video: bool,
+) -> Result<String, CliError> {
+    let (url, ext, encrypted) = if video {
+        (
+            clip.video_url
+                .as_deref()
+                .ok_or_else(|| CliError::Download("no video URL available".into()))?,
+            "mp4",
+            false,
+        )
+    } else if let Some(media) = clip.audio_download_media() {
+        (
+            media.url.as_str(),
+            audio_extension(media.content_type.as_deref(), &media.url),
+            media.is_encrypted(),
+        )
     } else {
-        clip.audio_url
-            .as_deref()
-            .ok_or_else(|| CliError::Download("no audio URL available".into()))?
+        (
+            clip.audio_download_url()
+                .ok_or_else(|| CliError::Download("no audio URL available".into()))?,
+            "mp3",
+            false,
+        )
     };
 
-    let ext = if video { "mp4" } else { "mp3" };
     let filename = clip_filename(&clip.title, &clip.id, ext);
     // Create the target dir up front: generation has already spent credits by
     // the time we download, so a missing `--download` dir must not error out.
@@ -30,6 +120,17 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     // so an interrupted or truncated transfer never leaves a file that looks
     // like a finished download.
     let part_path = path.with_extension(format!("{ext}.part"));
+
+    // Suno's current player obtains per-clip AES material from this endpoint;
+    // media entries carrying `encoding` are AES-CTR ciphertext.
+    let mut decryptor = if encrypted {
+        let (rights, jwt) = suno.media_rights(&clip.id).await?;
+        let key = unwrap_media_secret(&rights.key, &clip.id, &jwt)?;
+        let iv = unwrap_media_secret(&rights.iv, &clip.id, &jwt)?;
+        Some(MediaDecryptor::new(&key, &iv)?)
+    } else {
+        None
+    };
 
     // Bounded client: connect timeout, per-read inactivity timeout (catches a
     // stalled CDN mid-stream), and an overall cap. Without these a hung
@@ -58,7 +159,7 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
     );
     pb.set_message(filename.clone());
 
-    let written = match stream_to_file(&part_path, resp, &pb).await {
+    let written = match stream_to_file(&part_path, resp, &pb, decryptor.as_mut()).await {
         Ok(n) => n,
         Err(e) => {
             let _ = tokio::fs::remove_file(&part_path).await;
@@ -90,15 +191,19 @@ async fn stream_to_file(
     part_path: &Path,
     resp: reqwest::Response,
     pb: &ProgressBar,
+    mut decryptor: Option<&mut MediaDecryptor>,
 ) -> Result<u64, CliError> {
     use tokio::io::AsyncWriteExt as _;
     let mut file = tokio::fs::File::create(part_path).await?;
     let mut stream = resp.bytes_stream();
     let mut written: u64 = 0;
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(CliError::Http)?;
+        let mut chunk = chunk.map_err(CliError::Http)?.to_vec();
         pb.inc(chunk.len() as u64);
         written += chunk.len() as u64;
+        if let Some(decryptor) = decryptor.as_deref_mut() {
+            decryptor.apply(&mut chunk)?;
+        }
         file.write_all(&chunk).await?;
     }
     file.flush().await?;
@@ -212,5 +317,15 @@ mod tests {
             "夜の歌-remix-01234567.mp3"
         );
         assert_eq!(clip_filename("short", "abc", "mp3"), "short-abc.mp3");
+    }
+
+    #[test]
+    fn audio_extension_uses_the_media_container() {
+        assert_eq!(audio_extension(Some("m4a-opus"), "https://cdn/clip"), "m4a");
+        assert_eq!(audio_extension(Some("mp3"), "https://cdn/clip"), "mp3");
+        assert_eq!(
+            audio_extension(None, "https://cdn/clip.m4a?token=redacted"),
+            "m4a"
+        );
     }
 }
