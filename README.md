@@ -6,7 +6,7 @@
 
 <br />
 
-[![Star this repo](https://img.shields.io/github/stars/paperfoot/suno-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/suno-cli/stargazers)
+[![Star this repo](https://img.shields.io/github/stars/limsaehyun/suno-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/limsaehyun/suno-cli/stargazers)
 &nbsp;&nbsp;
 [![Follow @longevityboris](https://img.shields.io/badge/Follow_%40longevityboris-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/longevityboris)
 
@@ -15,10 +15,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)](LICENSE)
 &nbsp;
 [![Rust](https://img.shields.io/badge/Rust-2024-orange?style=for-the-badge&logo=rust)](https://www.rust-lang.org/)
-&nbsp;
-[![crates.io](https://img.shields.io/crates/v/suno?style=for-the-badge)](https://crates.io/crates/suno)
-&nbsp;
-[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](https://github.com/paperfoot/suno-cli/pulls)
+[![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)](https://github.com/limsaehyun/suno-cli/pulls)
 
 ---
 
@@ -38,43 +35,26 @@ This CLI fixes that. Auto-auth from your browser, every generation parameter exp
 
 ## Install
 
-### Homebrew (macOS/Linux)
+### Cargo
 
 ```bash
-brew tap paperfoot/tap
-brew install suno
-```
-
-### Cargo (any platform)
-
-```bash
-cargo install suno
+cargo install --locked --git https://github.com/limsaehyun/suno-cli
 ```
 
 ### Pre-built binaries
 
-Download from [GitHub Releases](https://github.com/paperfoot/suno-cli/releases) — binaries for macOS (Apple Silicon + Intel), Linux (x86_64 + ARM), and Windows.
+Tagged builds are published on [GitHub Releases](https://github.com/limsaehyun/suno-cli/releases) with SHA-256 checksums and GitHub build-provenance attestations.
 
 ### Updating
 
-`suno update` is distribution-aware: it detects how the binary was installed and never overwrites a package-manager-owned install.
+Automatic self-update is disabled until downloaded release assets can be verified locally. Reinstall from the fork instead:
 
 ```bash
-suno update --check    # see what's available (JSON when piped)
-suno update            # standalone installs: self-replace from GitHub Releases
-                       # brew/cargo installs: prints the right upgrade command instead
+cargo install --locked --force --git https://github.com/limsaehyun/suno-cli
+suno skill install
 ```
 
-| Install source | What `suno update` does |
-|---|---|
-| Homebrew | Never self-replaces — tells you to run `brew upgrade paperfoot/tap/suno` |
-| Cargo | Never self-replaces — tells you to run `cargo install --locked --force suno` |
-| Standalone binary | Downloads the latest GitHub release over HTTPS and swaps it in |
-| Unrecognized | Fails closed (exit 2) rather than risk overwriting a package-manager binary — reinstall from a known channel |
-
-Standalone self-update fetches the release asset from GitHub over HTTPS. Signed-artifact / attestation verification of the downloaded binary is a tracked follow-up (see [Known limitations](#known-limitations)).
-
-After updating, run `suno skill install` to refresh the agent skill.
+`suno update` prints this manual command and never downloads or replaces the running binary.
 
 ## Quick Start
 
@@ -114,6 +94,9 @@ suno generate \
   --tags "dream pop, synth, female vocal" \
   --lyrics-file song.txt \
   --model v6 --duration 180 --variety 2 --wait --download ./songs/
+
+# Inspect the exact request without authenticating or spending credits
+suno --json generate --title "Night Drive" --tags "dream pop" --instrumental --dry-run
 ```
 
 Generation costs credits per call (v5.5 was ≈70 — 35 per clip, 2 clips per call). v6 pricing is plan-dependent; `suno lyrics` is free. Check `suno models` and `suno credits` for what your plan can use.
@@ -215,7 +198,7 @@ suno doctor          Health checks: auth, JWT, Chrome, API reach, credits, captc
 suno agent-info      Machine-readable capabilities JSON
 suno guide           List built-in songwriting guides, or print one (guides <name>)
 suno skill           install | status — agent skill for Claude Code / Codex / Gemini
-suno update          Distribution-aware update (--check to peek first)
+suno update          Print the verified manual update path
 ```
 
 ## Guides
@@ -252,12 +235,12 @@ Piped or `--json`, `suno guide <name>` returns a `{name, content}` envelope; the
 suno auth --login    # Extracts session from your browser automatically
 ```
 
-Reads the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge. Exchanges it for a JWT via Clerk token exchange, stores the refreshable session in a `0600` local auth file, and refreshes stale JWTs automatically when the underlying browser session is still valid.
+Reads the Clerk auth cookie from Chrome, Arc, Brave, Firefox, or Edge and exchanges it for a JWT. On macOS and Windows, secrets are stored in the OS credential store; the `0600` auth file contains only non-secret session metadata. Other platforms use the permission-restricted file fallback. Stale JWTs refresh automatically while the browser session remains valid.
 
 Auth methods (in order of convenience):
 1. `suno auth --login` — automatic browser extraction (recommended)
-2. `suno auth --cookie <cookie>` — manual paste for headless servers; accepts either raw `__client` or a full browser `Cookie` header
-3. `suno auth --jwt <token>` — direct JWT, expires in ~1 hour
+2. `printf '%s' "$SUNO_COOKIE" | suno auth --cookie-stdin` — manual input for headless servers; accepts either raw `__client` or a full browser `Cookie` header without exposing it in the process list
+3. `printf '%s' "$SUNO_JWT" | suno auth --jwt-stdin` — direct JWT, expires in ~1 hour
 4. `suno auth --refresh` — force a fresh JWT from the stored Clerk session
 
 `suno auth` with no flags checks the existing session, or starts browser login if no auth is configured. `suno auth --logout` removes stored credentials.
@@ -458,6 +441,19 @@ suno skill status    # which platforms have it, and whether it's current
 
 Install is idempotent (`already_current` when nothing changed). The 0.5.x spelling `suno install-skill` still works as a hidden alias. After a CLI update, re-run `suno skill install` so agents see the new surface.
 
+### Run as an MCP server
+
+`suno mcp` starts a local stdio MCP server. It exposes account models, credits,
+and V6 generation. Generation previews are free; a paid tool call is rejected
+unless it supplies `confirm_spend: true`. The server never opens a network port
+and constructs CLI arguments directly without a shell.
+
+```toml
+[mcp_servers.suno]
+command = "suno"
+args = ["mcp"]
+```
+
 ### API Endpoint Versions (Confirmed)
 
 | Endpoint | Version | Status |
@@ -472,7 +468,8 @@ Generation tasks use `/api/generate/v2-web/` with the current web request shape.
 
 ## Known limitations
 
-- **Self-update artifact verification is a follow-up.** Standalone self-update downloads the release binary from GitHub over HTTPS but does not yet verify a signature or attestation on the downloaded artifact. That requires release-signing infrastructure (an embedded public key + signed release assets) and is tracked as a follow-up. Until it lands, an install source that can't be recognized fails closed instead of self-replacing.
+- Suno has no public API. Its private web endpoints can change without notice; reinstall the latest fork commit if schema-drift diagnostics appear.
+- Self-update stays disabled until the CLI can verify release assets locally. Tagged releases include checksums and GitHub provenance attestations for manual verification.
 
 ## Contributing
 
@@ -484,7 +481,7 @@ Generation tasks use `/api/generate/v2-web/` with the current web request shape.
 We especially welcome:
 - Audio upload implementation (S3 presigned flow documented in `API_INTELLIGENCE.md`)
 - Voice persona creation workflow (endpoints captured, request bodies needed)
-- OS keychain/Secret Service/CredMan storage for auth secrets
+- Linux Secret Service storage for auth secrets (macOS Keychain and Windows Credential Manager are supported)
 
 ## License
 
@@ -500,7 +497,7 @@ Built by [Boris Djordjevic](https://github.com/longevityboris) at [199 Biotechno
 
 **If this saves you time:**
 
-[![Star this repo](https://img.shields.io/github/stars/paperfoot/suno-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/paperfoot/suno-cli/stargazers)
+[![Star this repo](https://img.shields.io/github/stars/limsaehyun/suno-cli?style=for-the-badge&logo=github&label=%E2%AD%90%20Star%20this%20repo&color=yellow)](https://github.com/limsaehyun/suno-cli/stargazers)
 &nbsp;&nbsp;
 [![Follow @longevityboris](https://img.shields.io/badge/Follow_%40longevityboris-000000?style=for-the-badge&logo=x&logoColor=white)](https://x.com/longevityboris)
 

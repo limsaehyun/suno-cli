@@ -269,7 +269,7 @@ fn classify_404(path: &str) -> CliError {
             code: "api_error",
             message: format!(
                 "HTTP 404 on {path} — this Suno endpoint moved or its schema changed; \
-                 run `suno update` to pull the latest fix"
+                 reinstall the latest commit from https://github.com/limsaehyun/suno-cli"
             ),
         };
     }

@@ -110,6 +110,7 @@ fn command_map() -> serde_json::Map<String, Value> {
                     {"name": "--audio-influence", "type": "number", "required": false, "description": "0-100"},
                     {"name": "--instrumental", "type": "bool", "required": false, "default": false, "description": "No vocals"},
                     {"name": "--persona", "type": "string", "required": false, "description": "Voice persona UUID"},
+                    {"name": "--dry-run", "type": "bool", "required": false, "default": false, "description": "Print the exact request body without authenticating or spending credits"},
                     wait_option, download_option, token_option, no_captcha_option, scaffold_force_option
                 ]
             }),

@@ -135,3 +135,33 @@ fn doctor_without_auth_exits_2() {
         .expect("doctor must include an auth_file check");
     assert_eq!(auth_check["status"], "fail");
 }
+
+#[test]
+fn generate_dry_run_needs_no_auth_and_spends_nothing() {
+    let out = suno()
+        .env("SUNO_CONFIG_DIR", tempfile::tempdir().unwrap().path())
+        .args([
+            "--json",
+            "generate",
+            "--title",
+            "Preview",
+            "--tags",
+            "ambient",
+            "--instrumental",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["data"]["dry_run"], true);
+    assert_eq!(json["data"]["request"]["mv"], "chirp-hawk");
+    assert_eq!(
+        json["data"]["request"]["token_provider"],
+        serde_json::Value::Null
+    );
+}

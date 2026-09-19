@@ -7,6 +7,7 @@ mod config;
 mod download;
 mod errors;
 mod guard;
+mod mcp;
 mod output;
 
 use clap::Parser;
@@ -48,6 +49,25 @@ fn resolve_model(
 fn read_input_file(path: &str) -> Result<String, CliError> {
     std::fs::read_to_string(path)
         .map_err(|e| CliError::InvalidInput(format!("cannot read input file '{path}': {e}")))
+}
+
+fn read_secret_from_stdin(kind: &str) -> Result<String, CliError> {
+    use std::io::{IsTerminal, Read};
+
+    if std::io::stdin().is_terminal() {
+        return Err(CliError::InvalidInput(format!(
+            "--{kind}-stdin requires piped input"
+        )));
+    }
+    let mut secret = String::new();
+    std::io::stdin().read_to_string(&mut secret)?;
+    let secret = secret.trim().to_string();
+    if secret.is_empty() {
+        return Err(CliError::InvalidInput(format!(
+            "--{kind}-stdin received empty input"
+        )));
+    }
+    Ok(secret)
 }
 
 /// Credit protection shared by every command that sends lyrics into the
@@ -312,8 +332,20 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 Err(e) => return Err(e),
             };
 
+            let stdin_jwt = if args.jwt_stdin {
+                Some(read_secret_from_stdin("jwt")?)
+            } else {
+                None
+            };
+            let stdin_cookie = if args.cookie_stdin {
+                Some(read_secret_from_stdin("cookie")?)
+            } else {
+                None
+            };
+            let supplied_jwt = args.jwt.as_ref().or(stdin_jwt.as_ref());
+            let supplied_cookie = args.cookie.as_ref().or(stdin_cookie.as_ref());
             let has_explicit_auth_input =
-                args.login || args.refresh || args.jwt.is_some() || args.cookie.is_some();
+                args.login || args.refresh || supplied_jwt.is_some() || supplied_cookie.is_some();
             let should_login = args.login
                 || (!has_explicit_auth_input
                     && state.jwt.is_none()
@@ -352,7 +384,6 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 let (session_id, jwt) =
                     auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-                state.cookie = Some(browser_auth.cookie_header);
                 state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
                 state.session_id = Some(session_id);
                 state.jwt = Some(jwt);
@@ -360,7 +391,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     .device_id
                     .or(state.device_id)
                     .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
-            } else if let Some(cookie) = args.cookie.as_deref() {
+            } else if let Some(cookie) = supplied_cookie.map(String::as_str) {
                 // Manual: user provides a full Cookie header or raw Clerk __client value.
                 let browser_auth = auth::normalize_cookie_input(cookie)?;
                 let http = reqwest::Client::new();
@@ -368,7 +399,6 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 let (session_id, jwt) =
                     auth::clerk_token_exchange(&http, &browser_auth.clerk_client_cookie).await?;
 
-                state.cookie = Some(browser_auth.cookie_header);
                 state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
                 state.session_id = Some(session_id);
                 state.jwt = Some(jwt);
@@ -376,7 +406,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                     .device_id
                     .or(state.device_id)
                     .or_else(|| Some(uuid::Uuid::new_v4().to_string()));
-            } else if let Some(jwt) = args.jwt.clone() {
+            } else if let Some(jwt) = supplied_jwt.cloned() {
                 // Legacy: direct JWT paste (expires in ~1 hour)
                 state.jwt = Some(jwt);
                 if state.device_id.is_none() {
@@ -393,8 +423,8 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             // Verify
             let should_save_after_verify = args.refresh
                 || should_login
-                || args.cookie.is_some()
-                || args.jwt.is_some()
+                || supplied_cookie.is_some()
+                || supplied_jwt.is_some()
                 || args.device.is_some();
             let client = SunoClient::new_with_refresh(state.clone()).await?;
             let info = client.billing_info().await?;
@@ -530,12 +560,6 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 ));
             }
 
-            // Guard before any credit is spent or Chrome piloted.
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generate");
-            guard.acquire(args.force)?;
-
-            let c = client().await?;
-
             // Build the new v2-web request shape. Persona generation routes
             // through the same endpoint with persona_id set; the legacy
             // task="vox" field no longer exists in the v2-web schema.
@@ -550,6 +574,23 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             req.metadata.is_mumble = args.mumble;
             req.metadata.is_max_mode = args.max_mode;
             req.metadata.control_sliders = control_sliders;
+
+            if args.dry_run {
+                let preview = serde_json::json!({
+                    "dry_run": true,
+                    "operation": "generate",
+                    "request": req,
+                });
+                match fmt {
+                    OutputFormat::Json => output::json::success(preview),
+                    OutputFormat::Table => println!("{}", serde_json::to_string_pretty(&preview)?),
+                }
+                return Ok(());
+            }
+
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
+            guard.acquire(args.force)?;
+            let c = client().await?;
 
             req.token = resolve_captcha(&c, args.token, args.no_captcha, cli.quiet).await?;
 
@@ -599,7 +640,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 ));
             }
 
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "describe");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
 
             // The v2-web schema dropped `gpt_description_prompt` — inspiration
@@ -641,7 +682,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             // so it gets the same scaffold preflight and duplicate guard
             // before any credit is spent.
             reject_unfilled_scaffold(args.lyrics.as_deref(), args.force)?;
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "extend");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
 
             let mut req = GenerateRequest::new(model.to_api_key(), "custom");
@@ -668,7 +709,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
         Commands::Cover(args) => {
             let cfg = config::AppConfig::load()?;
             let model = resolve_model(args.model, &cfg)?;
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "cover");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
 
             let c = client().await?;
@@ -701,7 +742,7 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
 
         Commands::Remaster(args) => {
             let cfg = config::AppConfig::load()?;
-            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "remaster");
+            let mut guard = guard::DuplicateGuard::new(&config::data_dir(), "generation");
             guard.acquire(args.force)?;
             if args.variation.is_some() && !args.model.supports_variation() {
                 return Err(CliError::InvalidInput(
@@ -1050,15 +1091,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
             }
         }
 
-        Commands::Update(args) => {
-            // self_update drives blocking reqwest, which refuses to run on the
-            // async runtime thread (panics under debug_assertions) — hop to a
-            // blocking thread.
-            let (check, force, quiet) = (args.check, args.force, cli.quiet);
-            tokio::task::spawn_blocking(move || commands::update::run(check, force, fmt, quiet))
-                .await
-                .map_err(|e| CliError::Update(format!("update task failed: {e}")))??
-        }
+        Commands::Update(args) => commands::update::run(args.check, args.force, fmt, cli.quiet)?,
+
+        Commands::Mcp => mcp::run().await?,
 
         Commands::Contract { code } => commands::contract::run(fmt, code)?,
 

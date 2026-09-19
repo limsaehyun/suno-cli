@@ -4,8 +4,8 @@ version = "0.10.0"
 edition = "2024"
 description = "Generate AI music from your terminal — Suno v6 with tags, exclude, vocal control, duration, variety, and remaster"
 license = "MIT"
-repository = "https://github.com/StevenBuglione/suno-cli"
-homepage = "https://github.com/StevenBuglione/suno-cli"
+repository = "https://github.com/limsaehyun/suno-cli"
+homepage = "https://github.com/limsaehyun/suno-cli"
 readme = "README.md"
 keywords = ["suno", "music", "ai", "cli", "audio"]
 categories = ["command-line-utilities", "multimedia::audio"]
@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5", features = ["derive"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "process", "net", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "fs", "process", "net", "signal", "io-util", "io-std"] }
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -31,9 +31,6 @@ futures-util = "0.3"
 id3 = "1"
 rookie = "0.5"
 uuid = { version = "1", features = ["v4"] }
-# archive-zip + zip-deflate: release.yml ships a .zip on Windows; self_update
-# returns ArchiveNotEnabled("zip") without them.
-self_update = { version = "0.44", default-features = false, features = ["reqwest", "rustls", "compression-flate2", "archive-tar", "archive-zip", "compression-zip-deflate"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 toml = "0.8"
 
@@ -43,7 +40,11 @@ toml = "0.8"
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
+keyring = { version = "3.6.3", features = ["windows-native"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { version = "3.6.3", features = ["apple-native"] }
 
 [dev-dependencies]
 assert_cmd = "2"

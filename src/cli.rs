@@ -15,6 +15,7 @@ Tips:
   • Exit codes: 0 ok, 1 transient (retry), 2 config/auth, 3 bad input, 4 rate limited
   • Config: `suno config path` shows the file; SUNO_* env vars override it
   • Full machine-readable manifest: `suno agent-info | jq`
+  • Local MCP server: `suno mcp` (stdio only; paid calls require confirm_spend=true)
 
 Examples:
   suno write --genre \"indie rock\" --theme \"late-night city drives\" --vocal male --out song.txt
@@ -149,6 +150,9 @@ pub enum Commands {
 
     /// Distribution-aware update check/apply
     Update(UpdateArgs),
+
+    /// Run the local stdio MCP server
+    Mcp,
 
     /// Hidden: deterministic exit-code trigger for contract tests
     #[command(hide = true)]
@@ -372,6 +376,10 @@ pub struct GenerateArgs {
     /// Bypass the duplicate-run guard and the unresolved-placeholder preflight
     #[arg(long)]
     pub force: bool,
+
+    /// Print the exact request body without authenticating or spending credits
+    #[arg(long)]
+    pub dry_run: bool,
 
     /// Wait for generation to complete
     #[arg(short, long)]
@@ -719,15 +727,23 @@ pub struct AuthArgs {
     #[arg(long)]
     pub refresh: bool,
 
-    /// JWT token (manual fallback)
-    #[arg(long)]
+    /// JWT token (legacy; visible to local process inspection, prefer --jwt-stdin)
+    #[arg(long, hide = true, conflicts_with = "jwt_stdin")]
     pub jwt: Option<String>,
+
+    /// Read a JWT token from piped stdin
+    #[arg(long, conflicts_with_all = ["jwt", "cookie", "cookie_stdin"])]
+    pub jwt_stdin: bool,
 
     /// Clerk __client cookie (manual fallback for headless servers)
     ///
     /// Accepts either the raw __client value or a full browser Cookie header.
-    #[arg(long)]
+    #[arg(long, hide = true, conflicts_with = "cookie_stdin")]
     pub cookie: Option<String>,
+
+    /// Read a Clerk cookie or Cookie header from piped stdin
+    #[arg(long, conflicts_with_all = ["cookie", "jwt", "jwt_stdin"])]
+    pub cookie_stdin: bool,
 
     /// Device ID
     #[arg(long)]

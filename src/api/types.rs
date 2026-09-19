@@ -89,6 +89,8 @@ pub struct Clip {
     pub status: String,
     pub model_name: String,
     pub audio_url: Option<String>,
+    #[serde(default, skip_serializing)]
+    pub media_urls: Vec<ClipMediaUrl>,
     pub video_url: Option<String>,
     pub image_url: Option<String>,
     pub created_at: String,
@@ -98,6 +100,30 @@ pub struct Clip {
     pub upvote_count: u64,
     #[serde(default)]
     pub metadata: ClipMetadata,
+}
+
+impl Clip {
+    pub fn audio_download_url(&self) -> Option<&str> {
+        self.media_urls
+            .iter()
+            .find(|media| !media.encrypted && media.delivery.as_deref() == Some("progressive"))
+            .or_else(|| self.media_urls.iter().find(|media| !media.encrypted))
+            .map(|media| media.url.as_str())
+            .or_else(|| {
+                self.audio_url
+                    .as_deref()
+                    .filter(|url| !url.ends_with("/api/forbidden"))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ClipMediaUrl {
+    pub url: String,
+    #[serde(default)]
+    pub encrypted: bool,
+    #[serde(default)]
+    pub delivery: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -176,9 +202,10 @@ pub struct FilterPresence {
 pub struct GenerateRequest {
     /// Captcha/anti-bot token. Only needed when `/api/c/check` says the
     /// account is captcha-gated; `null` otherwise (matches the web app).
-    /// No companion `token_provider` field: Suno's v2-web schema types it as
-    /// an integer and 422s on a string, and the hCaptcha flow works without it.
     pub token: Option<String>,
+    /// The current web client always includes this key. `null` means the
+    /// captcha token was produced by Suno's built-in flow.
+    pub token_provider: Option<String>,
     pub generation_type: String,
     pub title: Option<String>,
     pub tags: Option<String>,
@@ -206,6 +233,10 @@ pub struct GenerateRequest {
     pub continue_clip_id: Option<String>,
     pub continued_aligned_prompt: Option<String>,
     pub continue_at: Option<f64>,
+    pub edit_session_id: Option<String>,
+    pub project_id: Option<String>,
+    pub lyrics_project_id: Option<String>,
+    pub lyricist_id: Option<String>,
     /// Random UUID generated per request — required.
     pub transaction_uuid: String,
 }
@@ -217,6 +248,7 @@ impl GenerateRequest {
     pub fn new(mv: &str, create_mode: &str) -> Self {
         Self {
             token: None,
+            token_provider: None,
             generation_type: "TEXT".to_string(),
             title: None,
             tags: None,
@@ -238,6 +270,10 @@ impl GenerateRequest {
             continue_clip_id: None,
             continued_aligned_prompt: None,
             continue_at: None,
+            edit_session_id: None,
+            project_id: None,
+            lyrics_project_id: None,
+            lyricist_id: None,
             transaction_uuid: uuid::Uuid::new_v4().to_string(),
         }
     }
@@ -432,14 +468,52 @@ mod tests {
     fn generate_request_token_serialization() {
         let mut req = GenerateRequest::new("chirp-fenix", "custom");
         let v = serde_json::to_value(&req).unwrap();
-        // token is null when no captcha is required (the common case); there
-        // is no token_provider field — Suno's v2-web schema rejects it.
+        // Both keys remain present as explicit nulls when captcha is not
+        // required. This matches the current web request contract.
         assert_eq!(v["token"], serde_json::Value::Null);
-        assert!(v.get("token_provider").is_none());
+        assert_eq!(v["token_provider"], serde_json::Value::Null);
 
         req.token = Some("solved".into());
         let v = serde_json::to_value(&req).unwrap();
         assert_eq!(v["token"], "solved");
+    }
+
+    #[test]
+    fn generate_request_keeps_current_schema_placeholders() {
+        let req = GenerateRequest::new("chirp-hawk", "custom");
+        let v = serde_json::to_value(&req).unwrap();
+        for field in [
+            "edit_session_id",
+            "project_id",
+            "lyrics_project_id",
+            "lyricist_id",
+        ] {
+            assert_eq!(v[field], serde_json::Value::Null, "missing {field}");
+        }
+    }
+
+    #[test]
+    fn clip_prefers_decodable_media_url_over_forbidden_placeholder() {
+        let clip: Clip = serde_json::from_value(serde_json::json!({
+            "id": "clip-id",
+            "title": "title",
+            "status": "complete",
+            "model_name": "chirp-goose",
+            "audio_url": "https://studio-api.prod.suno.com/api/forbidden",
+            "media_urls": [
+                {"url": "https://example.com/encrypted", "encrypted": true, "delivery": "streaming"},
+                {"url": "https://example.com/audio.mp3", "encrypted": false, "delivery": "progressive"}
+            ],
+            "video_url": null,
+            "image_url": null,
+            "created_at": "2026-09-20T00:00:00Z"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            clip.audio_download_url(),
+            Some("https://example.com/audio.mp3")
+        );
     }
 
     #[test]

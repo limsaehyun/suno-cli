@@ -754,7 +754,11 @@ fn merge_stored_auth(
             false,
         );
     }
-    if let Some(cookie_header) = auth.cookie.as_deref().filter(|c| !c.trim().is_empty()) {
+    if let Some(cookie_header) = auth
+        .legacy_cookie
+        .as_deref()
+        .filter(|c| !c.trim().is_empty())
+    {
         add_minimal_cookies_from_header(cookie_header, out, seen);
     }
 }

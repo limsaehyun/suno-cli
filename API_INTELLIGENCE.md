@@ -95,7 +95,7 @@ Returns full account info, credits, plan, models, features, limits.
 
 Default `mv` is now `chirp-hawk` (v6). `chirp-hawk-wild` and `chirp-goose` are the wild and mini variants.
 
-**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. Do **not** send a `token_provider` field: the v2-web endpoint 422s on the string (verified 2026; the CLI dropped it), so only `token` rides on the request body. Whether a captcha is needed at all is answered by the preflight below.
+**IMPORTANT**: Some accounts/flows require a fresh hCaptcha `token` field. The Rust CLI uses a piloted Chrome path when needed and also accepts `--token` for externally supplied solutions. The current web client includes `token_provider: null`; a provider name string is not accepted. Whether a captcha is needed at all is answered by the preflight below.
 
 ### POST /api/c/check
 **Captcha preflight** (verified live 2026-07-18 on both `studio-api-prod.suno.com` and `studio-api.prod.suno.com`). Request: `{"ctype": "generation"}` with Bearer JWT. Response: `{"required": false, "captcha_version": 1}` — `required` is false for accounts above Suno's trust threshold, so the solver can be skipped entirely. When `required` is true, generating one song in the suno.com UI clears the challenge.
@@ -115,7 +115,7 @@ Concatenate/extend clips. `{"clip_id": "<id>"}`
 
 Clip structure:
 ```
-id, title, status, model_name, audio_url, audio_url_2, video_url,
+id, title, status, model_name, audio_url, audio_url_2, media_urls, video_url,
 image_url, image_large_url, created_at, play_count, upvote_count,
 metadata: { tags, prompt, duration, avg_bpm, min_bpm, max_bpm,
             has_stem, is_mumble, is_remix, make_instrumental, type,

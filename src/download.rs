@@ -15,8 +15,7 @@ pub async fn download_clip(clip: &Clip, output_dir: &str, video: bool) -> Result
             .as_deref()
             .ok_or_else(|| CliError::Download("no video URL available".into()))?
     } else {
-        clip.audio_url
-            .as_deref()
+        clip.audio_download_url()
             .ok_or_else(|| CliError::Download("no audio URL available".into()))?
     };
 

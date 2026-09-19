@@ -2,7 +2,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -11,22 +12,126 @@ use crate::errors::CliError;
 const CLERK_BASE: &str = "https://auth.suno.com";
 const CLERK_JS_VERSION: &str = "5.117.0";
 const CLERK_API_VERSION: &str = "2025-11-10";
+const KEYRING_SERVICE: &str = "com.limsaehyun.suno-cli";
+const KEYRING_JWT: &str = "jwt";
+const KEYRING_CLERK: &str = "clerk-client";
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone)]
 pub struct AuthState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwt: Option<String>,
-    pub cookie: Option<String>,
+    #[serde(rename = "cookie", default, skip_serializing)]
+    pub legacy_cookie: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_id: Option<String>,
-    /// The __client cookie from clerk domain — long-lived (~7 days)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub clerk_client_cookie: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl fmt::Debug for AuthState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthState")
+            .field("jwt", &self.jwt.as_ref().map(|_| "<redacted>"))
+            .field(
+                "clerk_client_cookie",
+                &self.clerk_client_cookie.as_ref().map(|_| "<redacted>"),
+            )
+            .field("session_id", &self.session_id)
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct BrowserAuth {
     pub clerk_client_cookie: String,
-    pub cookie_header: String,
     pub device_id: Option<String>,
+}
+
+impl fmt::Debug for BrowserAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BrowserAuth")
+            .field("clerk_client_cookie", &"<redacted>")
+            .field("device_id", &self.device_id)
+            .finish()
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn load_keyring_secret(account: &str) -> Result<Option<String>, CliError> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|e| CliError::Config(format!("credential store: {e}")))?;
+    match entry.get_password() {
+        Ok(secret) => Ok(Some(secret)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(e) => Err(CliError::Config(format!("credential store: {e}"))),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn load_keyring_secret(_account: &str) -> Result<Option<String>, CliError> {
+    Ok(None)
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn save_keyring_secret(account: &str, secret: &str) -> Result<(), CliError> {
+    keyring::Entry::new(KEYRING_SERVICE, account)
+        .and_then(|entry| entry.set_password(secret))
+        .map_err(|e| CliError::Config(format!("credential store: {e}")))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn save_keyring_secret(_account: &str, _secret: &str) -> Result<(), CliError> {
+    Ok(())
+}
+
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn delete_keyring_secret(account: &str) -> Result<(), CliError> {
+    let entry = keyring::Entry::new(KEYRING_SERVICE, account)
+        .map_err(|e| CliError::Config(format!("credential store: {e}")))?;
+    match entry.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(e) => Err(CliError::Config(format!("credential store: {e}"))),
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn delete_keyring_secret(_account: &str) -> Result<(), CliError> {
+    Ok(())
+}
+
+fn keyring_supported() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
+}
+
+#[cfg(not(windows))]
+fn replace_file(from: &std::path::Path, to: &std::path::Path) -> Result<(), CliError> {
+    std::fs::rename(from, to)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn replace_file(from: &std::path::Path, to: &std::path::Path) -> Result<(), CliError> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();
+    let moved = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(())
 }
 
 impl AuthState {
@@ -35,27 +140,72 @@ impl AuthState {
         if !path.exists() {
             return Err(CliError::AuthMissing);
         }
+        if std::fs::symlink_metadata(&path)?.file_type().is_symlink() {
+            return Err(CliError::Config("refusing symlinked auth file".into()));
+        }
         let data = std::fs::read_to_string(&path)?;
-        serde_json::from_str(&data).map_err(|e| CliError::Config(format!("corrupt auth file: {e}")))
+        let mut state: Self = serde_json::from_str(&data)
+            .map_err(|e| CliError::Config(format!("corrupt auth file: {e}")))?;
+        if state.clerk_client_cookie.is_none()
+            && let Some(cookie) = state.legacy_cookie.as_deref()
+            && let Ok(browser_auth) = normalize_cookie_input(cookie)
+        {
+            state.clerk_client_cookie = Some(browser_auth.clerk_client_cookie);
+            if state.device_id.is_none() {
+                state.device_id = browser_auth.device_id;
+            }
+        }
+        let needs_migration = keyring_supported()
+            && (state.jwt.is_some()
+                || state.clerk_client_cookie.is_some()
+                || state.legacy_cookie.is_some());
+        if let Some(jwt) = load_keyring_secret(KEYRING_JWT)? {
+            state.jwt = Some(jwt);
+        }
+        if let Some(cookie) = load_keyring_secret(KEYRING_CLERK)? {
+            state.clerk_client_cookie = Some(cookie);
+        }
+        if needs_migration {
+            state.save()?;
+        }
+        Ok(state)
     }
 
     pub fn save(&self) -> Result<(), CliError> {
         let path = Self::path();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+            }
         }
-        let data = serde_json::to_string_pretty(self)?;
+        let mut disk_state = self.clone();
+        disk_state.legacy_cookie = None;
+        if keyring_supported() {
+            if let Some(jwt) = self.jwt.as_deref() {
+                save_keyring_secret(KEYRING_JWT, jwt)?;
+            }
+            if let Some(cookie) = self.clerk_client_cookie.as_deref() {
+                save_keyring_secret(KEYRING_CLERK, cookie)?;
+            }
+            disk_state.jwt = None;
+            disk_state.clerk_client_cookie = None;
+        }
+        let data = serde_json::to_string_pretty(&disk_state)?;
 
-        // Atomic write: create temp file with restricted permissions, then rename
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+        if tmp.exists() {
+            std::fs::remove_file(&tmp)?;
+        }
 
         #[cfg(unix)]
         {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .write(true)
                 .mode(0o600)
                 .open(&tmp)?;
@@ -68,7 +218,7 @@ impl AuthState {
             std::fs::write(&tmp, &data)?;
         }
 
-        std::fs::rename(&tmp, &path)?;
+        replace_file(&tmp, &path)?;
         Ok(())
     }
 
@@ -77,6 +227,8 @@ impl AuthState {
         if path.exists() {
             std::fs::remove_file(path)?;
         }
+        delete_keyring_secret(KEYRING_JWT)?;
+        delete_keyring_secret(KEYRING_CLERK)?;
         Ok(())
     }
 
@@ -166,7 +318,6 @@ pub fn normalize_cookie_input(input: &str) -> Result<BrowserAuth, CliError> {
             .and_then(|v| sanitize_device_id(v));
         return Ok(BrowserAuth {
             clerk_client_cookie: clerk_client_cookie.clone(),
-            cookie_header: normalized.to_string(),
             device_id,
         });
     }
@@ -182,7 +333,6 @@ pub fn normalize_cookie_input(input: &str) -> Result<BrowserAuth, CliError> {
         return Err(CliError::Config("empty Clerk __client cookie".into()));
     }
     Ok(BrowserAuth {
-        cookie_header: format!("__client={clerk_client_cookie}"),
         clerk_client_cookie,
         device_id: None,
     })
@@ -249,8 +399,6 @@ pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
         ("Edge", rookie::edge(Some(domains.clone()))),
     ] {
         if let Ok(cookies) = result {
-            let mut seen = HashSet::new();
-            let mut header_parts = Vec::new();
             let mut clerk_client_cookie: Option<String> = None;
             let mut auth_domain_clerk: Option<String> = None;
             let mut device_id: Option<String> = None;
@@ -269,17 +417,12 @@ pub fn extract_browser_auth() -> Result<BrowserAuth, CliError> {
                 if cookie.name == "ajs_anonymous_id" && device_id.is_none() {
                     device_id = sanitize_device_id(&cookie.value);
                 }
-                let key = (cookie.name.clone(), cookie.domain.clone());
-                if seen.insert(key) {
-                    header_parts.push(format!("{}={}", cookie.name, cookie.value));
-                }
             }
 
             if let Some(clerk_client_cookie) = auth_domain_clerk.or(clerk_client_cookie) {
                 eprintln!("Found Suno session in {name}");
                 return Ok(BrowserAuth {
                     clerk_client_cookie,
-                    cookie_header: header_parts.join("; "),
                     device_id,
                 });
             }
@@ -384,7 +527,6 @@ mod tests {
     fn normalizes_raw_client_cookie() {
         let auth = normalize_cookie_input("client_token").unwrap();
         assert_eq!(auth.clerk_client_cookie, "client_token");
-        assert_eq!(auth.cookie_header, "__client=client_token");
         assert!(auth.device_id.is_none());
     }
 
@@ -396,12 +538,30 @@ mod tests {
         .unwrap();
         assert_eq!(auth.clerk_client_cookie, "client_token");
         assert_eq!(auth.device_id.as_deref(), Some("device-123"));
-        assert!(auth.cookie_header.contains("__client=client_token"));
     }
 
     #[test]
     fn rejects_cookie_header_without_client() {
         let err = normalize_cookie_input("foo=bar; ajs_anonymous_id=device").unwrap_err();
         assert!(err.to_string().contains("__client"));
+    }
+
+    #[test]
+    fn debug_output_redacts_secrets() {
+        let state = AuthState {
+            jwt: Some("jwt-secret".into()),
+            clerk_client_cookie: Some("cookie-secret".into()),
+            ..Default::default()
+        };
+        let output = format!("{state:?}");
+        assert!(!output.contains("jwt-secret"));
+        assert!(!output.contains("cookie-secret"));
+        assert!(output.contains("<redacted>"));
+
+        let browser = BrowserAuth {
+            clerk_client_cookie: "browser-secret".into(),
+            device_id: None,
+        };
+        assert!(!format!("{browser:?}").contains("browser-secret"));
     }
 }
