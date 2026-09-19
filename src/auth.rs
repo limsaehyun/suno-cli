@@ -12,6 +12,7 @@ use crate::errors::CliError;
 const CLERK_BASE: &str = "https://auth.suno.com";
 const CLERK_JS_VERSION: &str = "5.117.0";
 const CLERK_API_VERSION: &str = "2025-11-10";
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 const KEYRING_SERVICE: &str = "com.limsaehyun.suno-cli";
 const KEYRING_JWT: &str = "jwt";
 const KEYRING_CLERK: &str = "clerk-client";
