@@ -165,3 +165,29 @@ fn generate_dry_run_needs_no_auth_and_spends_nothing() {
         serde_json::Value::Null
     );
 }
+
+#[test]
+fn generate_rejects_duration_for_non_v6_models() {
+    let out = suno()
+        .env("SUNO_CONFIG_DIR", tempfile::tempdir().unwrap().path())
+        .args([
+            "--json",
+            "generate",
+            "--title",
+            "Preview",
+            "--tags",
+            "ambient",
+            "--instrumental",
+            "--model",
+            "v5.5",
+            "--duration",
+            "10",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let json: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap();
+    assert_eq!(json["error"]["code"], "invalid_input");
+    assert!(json["error"]["message"].as_str().unwrap().contains("v6"));
+}

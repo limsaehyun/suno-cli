@@ -231,7 +231,13 @@ pub async fn run() -> Result<(), CliError> {
             continue;
         }
         let output = match serde_json::from_str::<Request>(&line) {
-            Ok(request) => handle(request).await?,
+            Ok(request) => {
+                let id = request.id.clone().unwrap_or(Value::Null);
+                match handle(request).await {
+                    Ok(output) => output,
+                    Err(e) => Some(error(id, -32603, format!("Internal error: {e}"))),
+                }
+            }
             Err(e) => Some(error(Value::Null, -32700, format!("Parse error: {e}"))),
         };
         if let Some(output) = output {

@@ -539,9 +539,9 @@ async fn run(cli: Cli, fmt: OutputFormat) -> Result<(), CliError> {
                 args.variety,
             )?;
             let duration = validate_duration(args.duration)?;
-            if duration.is_some() && !(model.is_v6_family() || matches!(model, ModelVersion::V55)) {
+            if duration.is_some() && !model.is_v6_family() {
                 return Err(CliError::InvalidInput(
-                    "--duration is supported on v6 (and v5.5) custom generation".into(),
+                    "--duration is a v6 control (v6, v6-wild, v6-mini)".into(),
                 ));
             }
             if args.variety.is_some() && !model.is_v6_family() {

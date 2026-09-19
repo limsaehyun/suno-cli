@@ -160,11 +160,15 @@ impl AuthState {
             && (state.jwt.is_some()
                 || state.clerk_client_cookie.is_some()
                 || state.legacy_cookie.is_some());
-        if let Some(jwt) = load_keyring_secret(KEYRING_JWT)? {
-            state.jwt = Some(jwt);
+        match load_keyring_secret(KEYRING_JWT) {
+            Ok(Some(jwt)) => state.jwt = Some(jwt),
+            Ok(None) => {}
+            Err(e) => eprintln!("Warning: could not read JWT from credential store: {e}"),
         }
-        if let Some(cookie) = load_keyring_secret(KEYRING_CLERK)? {
-            state.clerk_client_cookie = Some(cookie);
+        match load_keyring_secret(KEYRING_CLERK) {
+            Ok(Some(cookie)) => state.clerk_client_cookie = Some(cookie),
+            Ok(None) => {}
+            Err(e) => eprintln!("Warning: could not read Clerk session from credential store: {e}"),
         }
         if needs_migration {
             state.save()?;
